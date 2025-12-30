@@ -1,0 +1,561 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+library(tidyverse)
+library(readr)
+library(janitor)
+library(zoo) 
+library(dplyr)
+library(glmnet)
+library(ggplot2)
+library(readxl)
+library(reshape2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(randomForest)
+library(gbm)
+library(caret)
+
+
+# Define functions
+rmse <- function(actual, pred) sqrt(mean((actual - pred)^2, na.rm = TRUE)) # smaller, better; difference between prediction and reality, Squares the differences, Averages them, takes the square root
+mae  <- function(actual, pred) mean(abs(actual - pred), na.rm = TRUE) # Mean Absolute Error
+r2   <- function(actual, pred) {
+  1 - sum((actual - pred)^2, na.rm = TRUE) /
+    sum((actual - mean(actual, na.rm = TRUE))^2, na.rm = TRUE)
+} # how much of the variation in the true data your model can explain
+adj_r2 <- function(actual, pred, k) {
+  n <- length(actual)
+  r2_raw <- 1 - sum((actual - pred)^2, na.rm = TRUE) /
+    sum((actual - mean(actual, na.rm = TRUE))^2, na.rm = TRUE)
+  adj <- 1 - (1 - r2_raw) * ((n - 1) / (n - k - 1))
+  return(adj)
+}
+
+# load data 
+setwd("C:\\Users\\Yuanh\\Desktop\\Harvard\\2025 Fall\\API 222 Machine Learning and Big Data Analytics\\Assignment\\Final Project\\Paper\\Data")
+panel <- read.csv("panel_final_cleaned.csv", stringsAsFactors = FALSE)
+
+y_var <- "carbon_intensity"
+
+# rename variables to readable form 
+rename_dict <- c(
+  energy_use_per_capita      = "EG.USE.PCAP.KG.OE",
+  net_energy_imports         = "EG.IMP.CONS.ZS",
+  fossil_fuel_share          = "EG.USE.COMM.FO.ZS",
+  renewable_electricity_share= "EG.ELC.RNWX.ZS",
+  gdp_per_capita             = "NY.GDP.PCAP.KD",
+  gdp_growth_rate            = "NY.GDP.MKTP.KD.ZG",
+  industry_share_gdp         = "NV.IND.TOTL.ZS",
+  manufacturing_share_gdp    = "NV.IND.MANF.ZS",
+  urban_pop_growth           = "SP.URB.GROW",
+  urbanization_rate          = "SP.URB.TOTL.IN.ZS",
+  rd_expenditure_gdp         = "GB.XPD.RSDV.GD.ZS",
+  researchers_per_million    = "SP.POP.SCIE.RD.P6",
+  oil_rents_gdp              = "NY.GDP.PETR.RT.ZS",
+  gas_rents_gdp              = "NY.GDP.NGAS.RT.ZS"
+)
+
+panel <- panel %>%
+  rename(!!!rename_dict)
+
+x_vars <- names(rename_dict)
+
+colnames(panel)
+
+# Train–Test Split (2000–2022 vs 2023)
+train_data <- panel %>%
+  filter(year >= 2000, year <= 2022)
+
+test_data <- panel %>%
+  filter(year == 2023)
+
+# Preview
+nrow(train_data); nrow(test_data)
+head(panel)
+colnames(panel)
+
+```
+
+```{r}
+# Descriptive Statistics & Correlations
+# Descriptive Statistics of training data
+desc_stats <- train_data %>%
+  select(all_of(c(y_var, x_vars))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    n        = sum(!is.na(value)),
+    mean     = mean(value, na.rm = TRUE),
+    sd       = sd(value, na.rm = TRUE),
+    min      = min(value, na.rm = TRUE),
+    p25      = quantile(value, 0.25, na.rm = TRUE),
+    median   = median(value, na.rm = TRUE),
+    p75      = quantile(value, 0.75, na.rm = TRUE),
+    max      = max(value, na.rm = TRUE)
+  ) %>%
+  arrange(variable)
+
+desc_stats
+
+desc_test_stats <- test_data %>%
+  select(all_of(c(y_var, x_vars))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    n        = sum(!is.na(value)),
+    mean     = mean(value, na.rm = TRUE),
+    sd       = sd(value, na.rm = TRUE),
+    min      = min(value, na.rm = TRUE),
+    p25      = quantile(value, 0.25, na.rm = TRUE),
+    median   = median(value, na.rm = TRUE),
+    p75      = quantile(value, 0.75, na.rm = TRUE),
+    max      = max(value, na.rm = TRUE)
+  ) %>%
+  arrange(variable)
+
+desc_test_stats
+
+```
+```{r}
+# Correlation with Y 
+cor_with_y <- train_data %>%
+  select(all_of(c(y_var, x_vars))) %>%
+  cor(use = "pairwise.complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  filter(variable != y_var) %>%
+  select(variable, corr_with_carbon_intensity = !!sym(y_var)) %>%
+  arrange(desc(abs(corr_with_carbon_intensity)))
+
+cor_with_y
+
+
+```
+
+```{r}
+############################################################
+# Visuals
+# 1. Correlation heatmap
+############################################################
+plot_vars <- c(y_var, x_vars)
+corr_matrix <- train_data %>%
+  select(all_of(plot_vars)) %>%
+  cor(use = "pairwise.complete.obs")
+
+melted_corr <- reshape2::melt(corr_matrix)
+
+ggplot(melted_corr, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                       midpoint = 0, limit = c(-1, 1), space = "Lab") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90),
+        axis.text.y = element_text(size = 8)) +
+  labs(title = "Correlation Heatmap", x = "", y = "")
+```
+
+```{r}
+# 4. Time trend of Carbon Intensity
+############################################################
+
+train_data %>%
+  group_by(year) %>%
+  summarise(mean_ci = mean(carbon_intensity, na.rm = TRUE)) %>%
+  ggplot(aes(x = year, y = mean_ci)) +
+  geom_line(color = "darkgreen", size = 1) +
+  geom_point(color = "darkgreen") +
+  theme_minimal() +
+  labs(title = "Global Trend of Carbon Intensity (2000–2022)",
+       x = "Year", y = "Mean Carbon Intensity")
+```
+```{r}
+# 5. Density plots
+train_data %>%
+  select(all_of(plot_vars)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.4) +
+  facet_wrap(~ variable, scales = "free") +
+  theme_minimal() +
+  labs(title = "Density Plots of Variables", x = "Value", y = "Density")
+```
+```{r}
+
+map_year <- 2022
+
+ci_year <- panel %>%
+  filter(year == map_year) %>%
+  select(country_code, carbon_intensity)
+
+# world map
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# colnames(world)
+
+world_ci <- world %>%
+  left_join(ci_year, by = c("iso_a3" = "country_code"))
+
+ggplot(world_ci) +
+  geom_sf(aes(fill = pmin(carbon_intensity, 3)), color = NA) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    limits = c(0, 3),
+    na.value = "grey90",
+    name = "Carbon intensity\n(capped at 3)"
+  ) +
+  theme_minimal() +
+  labs(
+    title = paste("Carbon Intensity of GDP in", map_year),
+    subtitle = "CO2e per constant 2015 US$ of GDP"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+```
+
+```{r}
+# Multiple Linear Regression (OLS) – Inference & Prediction
+# model training 
+ols_formula <- as.formula(
+  paste(y_var, "~", paste(x_vars, collapse = " + "))
+)
+
+ols_model <- lm(ols_formula, data = train_data)
+
+# regression results 
+summary(ols_model)
+
+ols_coef_table <- broom::tidy(ols_model)
+ols_coef_table
+
+# prediction
+train_data <- train_data %>%
+  mutate(
+    ols_pred_train = predict(ols_model, newdata = train_data)
+  )
+
+ols_train_rmse <- rmse(train_data[[y_var]], train_data$ols_pred_train)
+ols_train_mae  <- mae(train_data[[y_var]], train_data$ols_pred_train)
+ols_train_r2   <- r2(train_data[[y_var]], train_data$ols_pred_train)
+
+ols_train_rmse; ols_train_mae; ols_train_r2
+
+# test results 
+test_data <- test_data %>%
+  mutate(
+    ols_pred_test = predict(ols_model, newdata = test_data)
+  )
+
+ols_test_rmse <- rmse(test_data[[y_var]], test_data$ols_pred_test)
+ols_test_mae  <- mae(test_data[[y_var]], test_data$ols_pred_test)
+ols_test_r2   <- r2(test_data[[y_var]], test_data$ols_pred_test)
+
+ols_test_rmse; ols_test_mae; ols_test_r2
+
+```
+
+```{r}
+# LASSO – Inference & Prediction
+x_train <- train_data %>%
+  select(all_of(x_vars)) %>%
+  as.matrix()
+
+y_train <- train_data[[y_var]]
+
+x_test <- test_data %>%
+  select(all_of(x_vars)) %>%
+  as.matrix()
+
+y_test <- test_data[[y_var]]
+
+# Cross-validated LASSO on training data
+set.seed(123) 
+cv_lasso <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 1,           # LASSO
+  family = "gaussian",
+  nfolds = 10,
+  standardize = TRUE   
+)
+
+lambda_min  <- cv_lasso$lambda.min   # min CV error -> prediction
+lambda_1se  <- cv_lasso$lambda.1se   # 1-SE -> sparse,inference
+
+lambda_min; lambda_1se
+
+# LASSO coefficients for inference
+coef_lasso_1se <- coef(cv_lasso, s = "lambda.1se") %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  rename(coef = lambda.1se)
+
+lasso_1se_nonzero <- coef_lasso_1se %>%
+  filter(coef != 0)
+
+lasso_1se_nonzero
+
+coef_lasso_min <- coef(cv_lasso, s = "lambda.min") %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  rename(coef = lambda.min)
+
+lasso_min_nonzero <- coef_lasso_min %>%
+  filter(coef != 0)
+
+lasso_min_nonzero
+
+# LASSO prediction performance
+
+##  lambda.min(for prediction)
+# train prediction
+lasso_pred_train_min <- predict(cv_lasso, newx = x_train, s = "lambda.min") %>% as.numeric()
+# test
+lasso_pred_test_min  <- predict(cv_lasso, newx = x_test,  s = "lambda.min") %>% as.numeric()
+
+lasso_train_rmse_min <- rmse(y_train, lasso_pred_train_min)
+lasso_train_mae_min  <- mae(y_train, lasso_pred_train_min)
+lasso_train_r2_min   <- r2(y_train,  lasso_pred_train_min)
+
+lasso_test_rmse_min  <- rmse(y_test, lasso_pred_test_min)
+lasso_test_mae_min   <- mae(y_test, lasso_pred_test_min)
+lasso_test_r2_min    <- r2(y_test,  lasso_pred_test_min)
+
+## lambda.1se
+lasso_pred_train_1se <- predict(cv_lasso, newx = x_train, s = "lambda.1se") %>% as.numeric()
+lasso_pred_test_1se  <- predict(cv_lasso, newx = x_test,  s = "lambda.1se") %>% as.numeric()
+
+lasso_train_rmse_1se <- rmse(y_train, lasso_pred_train_1se)
+lasso_train_mae_1se  <- mae(y_train, lasso_pred_train_1se)
+lasso_train_r2_1se   <- r2(y_train,  lasso_pred_train_1se)
+
+lasso_test_rmse_1se  <- rmse(y_test, lasso_pred_test_1se)
+lasso_test_mae_1se   <- mae(y_test, lasso_pred_test_1se)
+lasso_test_r2_1se    <- r2(y_test,  lasso_pred_test_1se)
+```
+
+```{r}
+# Model Performance Comparison Table
+model_performance <- tibble::tibble(
+  model       = c("OLS", "LASSO (lambda.min)", "LASSO (lambda.1se)"),
+  lambda      = c(NA,       lambda_min,        lambda_1se),
+  train_rmse  = c(ols_train_rmse,  lasso_train_rmse_min,  lasso_train_rmse_1se),
+  train_mae   = c(ols_train_mae,   lasso_train_mae_min,   lasso_train_mae_1se),
+  train_r2    = c(ols_train_r2,    lasso_train_r2_min,    lasso_train_r2_1se),
+  test_rmse   = c(ols_test_rmse,   lasso_test_rmse_min,   lasso_test_rmse_1se),
+  test_mae    = c(ols_test_mae,    lasso_test_mae_min,    lasso_test_mae_1se),
+  test_r2     = c(ols_test_r2,     lasso_test_r2_min,     lasso_test_r2_1se)
+)
+
+model_performance
+```
+```{r}
+# LASSO (lambda.min) basically behaves like OLS, but with slightly better predictive stability.
+```
+
+```{r}
+# Prepare training and testing matrices
+train_x <- train_data[, x_vars]
+train_y <- train_data[[y_var]]
+
+test_x  <- test_data[, x_vars]
+test_y  <- test_data[[y_var]]
+```
+
+```{r}
+# Random Forest
+set.seed(123)
+
+rf_model <- randomForest(
+  x = train_x,
+  y = train_y,
+  ntree = 500,
+  mtry = floor(sqrt(length(x_vars))),   
+  importance = TRUE
+)
+
+# RF variable importance
+rf_importance <- importance(rf_model)
+rf_importance_df <- data.frame(
+  variable = rownames(rf_importance),
+  importance = rf_importance[, "%IncMSE"]
+) %>% arrange(desc(importance))
+rf_importance_df
+
+# RF prediction
+rf_pred_train <- predict(rf_model, newdata = train_x)
+rf_pred_test  <- predict(rf_model, newdata = test_x)
+
+rf_train_rmse <- rmse(train_y, rf_pred_train)
+rf_train_mae  <- mae(train_y, rf_pred_train)
+rf_train_r2   <- r2(train_y, rf_pred_train)
+
+rf_test_rmse  <- rmse(test_y, rf_pred_test)
+rf_test_mae   <- mae(test_y, rf_pred_test)
+rf_test_r2    <- r2(test_y, rf_pred_test)
+```
+```{r}
+# Importance Graph
+varImpPlot(
+  rf_model,
+  main = "%IncMSE Variable Importance",
+  type = 1,                     # 1 = %IncMSE
+)
+
+#Prediction Graph 
+pred_2023 <- predict(rf_model, newdata = test_x)
+
+plot_df_2023 <- data.frame(
+  Actual = test_y,
+  Predicted = pred_2023
+)
+plot_df_2023$error <- abs(plot_df_2023$Predicted - plot_df_2023$Actual)
+
+ggplot(plot_df_2023, aes(x = Actual, y = Predicted, color = error)) +
+  geom_point(size = 2) +
+  scale_color_gradient(low = "blue", high = "red") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  labs(
+    title = "Predicted vs. Actual (2023)",
+    x = "Actual Carbon Intensity",
+    y = "Predicted Carbon Intensity",
+    color = "Absolute Error"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Tree 1 Example
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+
+tree1 <- getTree(rf_model, k = 1, labelVar = TRUE)
+
+tree_rpart <- rpart(
+  train_y ~ ., 
+  data = train_x, 
+  control = rpart.control(maxdepth = 4)
+)
+
+rpart.plot(tree_rpart, type = 2, extra = 1, fallen.leaves = TRUE)
+```
+
+```{r}
+# Gradient Boosting
+set.seed(123)
+
+gbm_model <- gbm(
+  formula = as.formula(paste(y_var, "~", paste(x_vars, collapse = "+"))),
+  data = train_data,
+  distribution = "gaussian",
+  n.trees = 3000,
+  interaction.depth = 3,
+  shrinkage = 0.01,
+  n.minobsinnode = 10,
+  bag.fraction = 0.8,
+  train.fraction = 1.0,
+  verbose = FALSE
+)
+
+# Best number of trees using test set (1-step validation)
+best_iter <- gbm.perf(gbm_model, method = "OOB", plot.it = FALSE)
+
+# Predictions
+gbm_pred_train <- predict(gbm_model, train_data, n.trees = best_iter)
+gbm_pred_test  <- predict(gbm_model, test_data, n.trees = best_iter)
+
+# Performance
+gbm_train_rmse <- rmse(train_y, gbm_pred_train)
+gbm_train_mae  <- mae(train_y, gbm_pred_train)
+gbm_train_r2   <- r2(train_y, gbm_pred_train)
+
+gbm_test_rmse <- rmse(test_y, gbm_pred_test)
+gbm_test_mae  <- mae(test_y, gbm_pred_test)
+gbm_test_r2   <- r2(test_y, gbm_pred_test)
+
+
+```
+
+```{r}
+# Comparison Table for All Models 
+comparison_table <- data.frame(
+  model = c(
+    "OLS",
+    "LASSO (lambda.min)",
+    "LASSO (lambda.1se)",
+    "Random Forest",
+    "Gradient Boosting"
+  ),
+  lambda = c(
+    NA,
+    lambda_min,
+    lambda_1se,
+    NA,
+    NA
+  ),
+  train_rmse = c(
+    ols_train_rmse,
+    lasso_train_rmse_min,
+    lasso_train_rmse_1se,
+    rf_train_rmse,
+    gbm_train_rmse
+  ),
+  train_mae = c(
+    ols_train_mae,
+    lasso_train_mae_min,
+    lasso_train_mae_1se,
+    rf_train_mae,
+    gbm_train_mae
+  ),
+  train_r2 = c(
+    ols_train_r2,
+    lasso_train_r2_min,
+    lasso_train_r2_1se,
+    rf_train_r2,
+    gbm_train_r2
+  ),
+  test_rmse = c(
+    ols_test_rmse,
+    lasso_test_rmse_min,
+    lasso_test_rmse_1se,
+    rf_test_rmse,
+    gbm_test_rmse
+  ),
+  test_mae = c(
+    ols_test_mae,
+    lasso_test_mae_min,
+    lasso_test_mae_1se,
+    rf_test_mae,
+    gbm_test_mae
+  ),
+  test_r2 = c(
+    ols_test_r2,
+    lasso_test_r2_min,
+    lasso_test_r2_1se,
+    rf_test_r2,
+    gbm_test_r2
+  ),
+  stringsAsFactors = FALSE
+)
+
+comparison_table
+
+```
+```{r}
+# Random Forest is the best model
+```
+
